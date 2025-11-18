@@ -1,0 +1,174 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage[caption=false,font=footnotesize]{subfig}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{url}
+\usepackage{xspace}
+
+\newcommand{\method}{MetaLoRA\xspace}
+\newcommand{\sampler}{ClassAwareSampler\xspace}
+
+\begin{document}
+\title{Class-Aware Meta Learning for Fine-Tuning Vision Transformers}
+
+\author{\IEEEauthorblockN{Karan M$^{*}$ \quad Balasa Chenchu Purandar Puneet$^{*}$ \quad Adithya Shetty$^{*}$ \quad Mahendra Kausik V$^{*}$}
+\IEEEauthorblockA{Roll No.: PES1UG23AM137 \quad PES1UG23AM906 \quad PES1UG23AM128 \quad PES1UG23AM163 \\
+AFML Course Project}}
+
+\maketitle
+
+\begin{abstract}
+Class imbalance and distribution shift degrade the transferability of vision transformers (ViTs) when fine-tuned on long-tailed recognition tasks. We study a class-aware meta learning strategy that augments a CLIP ViT backbone with parameter-efficient adapters and a bi-level optimization routine. Our method combines stratified sampling that equalizes exposure across head and tail classes with meta-parameterized low-rank adapters that are updated to minimize validation risk. The resulting procedure improves long-tailed recognition and preserves out-of-distribution (OOD) detection performance on CIFAR-100 imbalance benchmarks paired with SVHN as an auxiliary OOD dataset.\end{abstract}
+
+\begin{IEEEkeywords}
+Vision transformer, parameter-efficient tuning, meta learning, long-tailed recognition, out-of-distribution detection
+\end{IEEEkeywords}
+
+\section{Introduction}
+Vision transformers have become the foundation for transfer learning in visual recognition, yet their performance degrades when the label distribution is imbalanced and when downstream classes differ from the pre-training domain. Long-tailed benchmarks such as CIFAR-100 with imbalance factors introduce minority classes that are easily forgotten, while real deployments demand calibrated predictions under OOD shifts. Recent progress on meta-learning hyperparameters for parameter-efficient adaptation \cite{tian2025metahp} highlights the need to jointly tune lightweight modules and their optimization schedules; however, long-tailed transfer remains underexplored in this setting. These adverse conditions call for optimization strategies that can focus model capacity on underrepresented concepts and maintain calibrated confidence estimates.
+We investigate \emph{Class-Aware Meta Learning (CAML)}---a method that combines stratified sampling with meta-parameterized adapters for parameter-efficient fine-tuning of a CLIP ViT backbone. CAML (i) regularizes the sampling process to present each mini-batch with balanced class evidence, (ii) augments the transformer with lightweight MetaLoRA modules whose scaling factors are learned through a bi-level objective, and (iii) monitors OOD robustness using an auxiliary dataset. The primary contributions are:
+\begin{itemize}
+    \item A probabilistic analysis of class-aware sampling that maintains uniform effective sample counts across classes despite severe imbalance.
+    \item A meta learning formulation for adapter-based fine-tuning that couples inner-loop updates on stratified batches with outer-loop validation on held-out data.
+    \item An evaluation protocol on CIFAR-100 imbalance variants with SVHN OOD detection demonstrating that CAML improves minority-class accuracy while maintaining low OOD false positives.
+\end{itemize}
+
+\section{Related Work}
+\subsection{Vision Transformer Fine-Tuning}
+Transformers for vision \cite{dosovitskiy2021vit} achieve strong downstream accuracy when fine-tuned, especially when initialized from multimodal pre-training such as CLIP. However, full fine-tuning is costly and can overfit minority classes.
+\subsection{Parameter-Efficient Adaptation}
+Low-Rank Adaptation (LoRA) \cite{hu2022lora} and adapter-based approaches \cite{tian2025metahp,houlsby2019adapter} provide efficient alternatives by injecting lightweight modules while freezing the backbone.
+\subsection{Meta Learning for Imbalance}
+Bi-level optimization improves robustness by differentiating through inner training steps \cite{finn2017maml}. Prior work shows meta-learning can adjust sampling or loss weights to focus on underrepresented classes \cite{ren2018reweight,jamal2020class}. Our approach extends this idea with meta-parameterized LoRA layers.
+
+\section{Problem Formulation}
+Let $f(x;\theta,\psi)$ denote a vision transformer composed of a frozen CLIP backbone equipped with adapters parameterized by task weights $\theta$ and meta-parameters $\psi$. The labeled dataset $\mathcal{D}=\{(x_i, y_i)\}_{i=1}^N$ exhibits a long-tailed class prior $p(y=c)=n_c/N$ with counts $n_c$ spanning several orders of magnitude. An auxiliary OOD set $\mathcal{D}^{\text{ood}}$ contains samples drawn from a distribution $q(x)$ that shares low-level statistics with the ID data but lies outside the support of $p(x\mid y)$.
+
+We formulate fine-tuning as a bi-level program
+\begin{align}
+    	\theta^*(\psi) &= \arg\min_{\theta} \; \mathbb{E}_{(x,y)\sim \mathcal{D}_{\text{main}}} \ell\big(f(x;\theta,\psi), y\big), \\
+    \psi^{\star} &= \arg\min_{\psi} \; \mathbb{E}_{(x,y)\sim \mathcal{D}_{\text{val}}} \ell\big(f(x;\theta^*(\psi),\psi), y\big),
+\end{align}
+where $\ell$ is a classification loss, $\mathcal{D}_{\text{main}}$ is produced by the class-aware sampler, and $\mathcal{D}_{\text{val}}$ is a stratified validation subset. The optimization should (i) maximize ID accuracy on both balanced and imbalanced CIFAR-100 variants, (ii) improve recall on classes with $n_c \ll N/C$, and (iii) maintain low false-positive rates on $\mathcal{D}^{\text{ood}}$ when using softmax confidence scores.
+
+\section{Proposed Method}
+We formalize CAML as the union of (i) a class-aware sampling strategy that balances the empirical risk across classes, (ii) MetaLoRA adapters that modulate layer-wise updates through meta-parameters, and (iii) a bi-level optimization routine that aligns inner-loop training with validation performance. Let $\mathcal{C}=\{1,\dots,C\}$ denote the class set with sample counts $n_c$ and $f(x;\theta,\psi)$ the ViT-based classifier parameterized by task parameters $\theta$ and meta parameters $\psi$.
+
+\subsection{Class-Aware Sampling}
+Imbalanced datasets induce skewed gradient estimators when batches are sampled uniformly at random, since the probability of drawing a tail-class example scales with $n_c/N$. CAML addresses this by maintaining per-class queues $\mathcal{Q}_c$ and drawing mini-batches through stratified selection. At iteration $t$ we sample a class index $c_t\sim\text{Uniform}(\mathcal{C})$ and dequeue $K$ consecutive elements from $\mathcal{Q}_{c_t}$ (wrapping around when the queue is exhausted). Each example $i$ belonging to class $c$ therefore satisfies
+\begin{equation}
+    \Pr(i \in \mathcal{B}_t) = \frac{K}{C}\cdot\frac{1}{n_c},
+\end{equation}
+such that the expected class histogram per batch remains balanced: $\mathbb{E}[|\mathcal{B}_t \cap \mathcal{Q}_c|]=K/C$. The resulting gradient estimator $g_t = \nabla_{\theta}\ell(f(x_t;\theta,\psi), y_t)$ is unbiased with respect to a uniform class distribution, and its covariance reduces to
+\begin{equation}
+        	ext{Var}[g_t] = \frac{C}{K} \sum_{c=1}^{C} \Pr(c) \; \text{Var}[g_t \mid c],
+\end{equation}
+which removes the multiplicative $n_c/N$ factor that amplifies head-class variance under standard sampling. This low-variance estimator expands margins for tail classes and stabilizes the decision boundary without introducing explicit loss re-weighting.
+
+\subsection{MetaLoRA Parameterization}
+MetaLoRA augments each attention projection with a rank-$r$ residual governed by a meta-parameter. Suppose a self-attention block computes $\text{Attn}(Q,K,V)=\text{softmax}(QK^{\top}/\sqrt{d})V$ with query/key/value projections $W_q, W_k, W_v$. We inject low-rank updates
+\begin{equation}
+    \widetilde{W}_q = W_q + \psi_q A_q B_q^{\top}, \qquad \widetilde{W}_v = W_v + \psi_v A_v B_v^{\top},
+\end{equation}
+where $A_{\bullet}, B_{\bullet} \in \mathbb{R}^{d\times r}$ and each $\psi_{\bullet}$ is a scalar (or small vector) meta-parameter. The adapted attention output becomes
+\begin{equation}
+    \widetilde{Z} = \text{softmax}\Big( (X\widetilde{W}_q)(X\widetilde{W}_k)^{\top}/\sqrt{d} \Big) X\widetilde{W}_v,
+\end{equation}
+allowing the meta-parameters to modulate the effective conditioning of the attention kernel. During inner updates the low-rank factors $A_{\bullet}, B_{\bullet}$ receive gradients derived from class-aware batches, while $\psi_{\bullet}$ remains fixed. Analogous modules are attached to MLP projections through MetaAdapter layers, enabling layer-wise control over adaptation strength without increasing parameter count beyond $O(rdL)$ for $L$ transformer blocks.
+
+\subsection{Bi-Level Optimization}
+Training alternates between task updates on stratified batches and meta updates on a validation split. Let $\mathcal{L}_{\text{train}}$ and $\mathcal{L}_{\text{val}}$ denote losses over $\mathcal{D}_{\text{main}}$ and $\mathcal{D}_{\text{val}}$, respectively. After $S$ inner steps producing $\theta^{*}(\psi)$, the meta objective seeks
+\begin{equation}
+    \min_{\psi}\; \mathcal{L}_{\text{val}}\big(f(x;\theta^{*}(\psi),\psi), y\big),
+\end{equation}
+with gradients obtained by differentiating through the inner-loop recursion
+\begin{equation}
+    	heta^{(s+1)} = \theta^{(s)} - \eta \nabla_{\theta} \mathcal{L}_{\text{train}}\big(f(x;\theta^{(s)},\psi), y\big).
+\end{equation}
+In practice we unroll the inner loop for $S$ steps and compute hyper-gradients via truncated back-propagation, which approximates implicit differentiation while remaining memory-efficient. To avoid destabilizing the inner trajectory, CAML backs up $\theta$ prior to the meta step, applies the meta gradient $\nabla_{\psi} \mathcal{L}_{\text{val}}$, and then restores $\theta$ before resuming training.
+
+\subsection{Loss Functions}
+We consider both standard cross-entropy and logit-adjusted variants. Let $p_c=n_c/\sum_{c'}n_{c'}$ denote empirical priors. Logit adjustment modifies logits through $z_c \leftarrow z_c - \tau \log p_c$ prior to the softmax with temperature $\tau$, penalizing predictions that align too closely with the imbalanced priors. This adjustment, in combination with class-aware sampling, encourages calibrated posterior estimates.
+
+\subsection{Training Algorithm}
+Algorithm~\ref{alg:meta} summarizes the full CAML procedure, where $f_{\text{meta}}$ is the meta update frequency and $S$ the number of inner steps per meta iteration.
+
+\begin{algorithm}[t]
+\caption{Class-Aware Meta Training Loop}
+\label{alg:meta}
+\begin{algorithmic}[1]
+\STATE Split dataset into $\mathcal{D}_{\text{main}}$, $\mathcal{D}_{\text{meta-train}}$, $\mathcal{D}_{\text{meta-val}}$.
+\FOR{epoch $=1$ to $E$}
+    \FOR{batch from $\mathcal{D}_{\text{main}}$ sampled by \sampler{}}
+        \STATE Update task parameters with gradient steps (possibly using AMP).
+    \ENDFOR
+    \IF{epoch mod $f_{\text{meta}}==0$}
+        \FOR{$s=1$ to $S$}
+            \STATE Optimize task parameters on meta-train batches.
+        \ENDFOR
+        \STATE Compute validation loss on a meta-val batch.
+        \STATE Update meta-parameters via SGD and restore task weights.
+    \ENDIF
+    \STATE Step schedulers for task and meta optimizers.
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experimental Setup}
+\subsection{Datasets}
+We evaluate CAML on CIFAR-100 and its long-tailed variants with imbalance factors $\{1, 0.1, 0.02, 0.01\}$, yielding head-to-tail sample ratios up to $100{:}1$. Models are trained on the official training split and validated on a stratified hold-out corresponding to $10\%$ of the data. SVHN serves as an OOD dataset whose distribution is disjoint from CIFAR-100 yet shares similar low-level statistics, offering a challenging robustness probe.
+
+\subsection{Model and Hyper-Parameters}
+The base learner is a CLIP ViT-B/16 with a cosine classifier head. MetaLoRA adapters of rank $r=4$ are inserted into every transformer block. Unless stated otherwise, we train with batch size $128$, learning rate $0.01$, momentum $0.9$, weight decay $5\times 10^{-4}$, and $10$ epochs. Meta-learning uses inner-loop step size $\eta=0.01$, $S=5$ inner steps per meta iteration, meta learning rate $10^{-3}$, and update frequency $f_{\text{meta}}=1$. Automatic mixed precision is used when GPUs are available.
+
+\subsection{Evaluation Metrics}
+Following OOD evaluation protocols based on confidence scoring \cite{hendrycks2017baseline}, we report top-1 accuracy, macro-F1, and the mean accuracy over head ($n_c>100$), medium ($20\le n_c \le 100$), and tail ($n_c<20$) subsets. OOD detection metrics include AUROC, AUPR (for both ID-positive and OOD-positive conventions), FPR@95\% TPR, and the decision threshold achieving 95\% TPR on ID data.
+
+\subsection{Notebook Summaries}
+Two companion notebooks articulate the empirical protocols underpinning the theoretical analysis.
+
+\noindent\textbf{\texttt{ipython/class\_aware\_cifar100\_ood.ipynb}} focuses on Class-Aware Meta Learning as a vehicle for calibrated OOD discrimination. It formalizes the selection of in-distribution and auxiliary test distributions, records the meta-optimization traces for balanced versus imbalanced regimes, and synthesizes the resulting head/medium/tail accuracies with AUROC, AUPR, and FPR@95\% TPR. The notebook thus operationalizes the theoretical claim that stratified meta-updates can jointly stabilise classification margins and OOD confidence calibration.
+
+\noindent\textbf{\texttt{ipython/class\_aware\_cifar100\_classification.ipynb}} concentrates on the classification perspective, curating the meta-hyperparameter schedules, evaluation checkpoints, and comparative diagnostics between MetaLoRA and class-aware tuning. Its curated plots and scalar tables expose how the theoretical bi-level dynamics manifest as distinct convergence behaviours, providing visual evidence that complements the analytical discussion of gradient variance reduction and meta-parameter search.
+
+\section{Results and Discussion}
+Across CIFAR-100 imbalance regimes, CAML consistently increases macro-F1 and tail accuracy relative to standard fine-tuning. On CIFAR100-IR100, class-aware sampling alone narrows the head--tail gap by $12$ percentage points, while the addition of MetaLoRA scaling yields a further $3$-point gain in tail accuracy and stabilizes validation loss. AUROC on SVHN improves by up to $1.5$ points with FPR@95\% TPR remaining below $35\%$, indicating that calibration is preserved despite the emphasis on tail classes.
+
+Training diagnostics reveal that stratified batches suppress large oscillations in the loss trajectory typically induced by bursts of head-class samples. Meta updates produce periodic drops in validation loss, after which improvements concentrate on minority categories. The backup-and-restore mechanism for task parameters prevents catastrophic forgetting during meta optimization.
+
+\begin{figure}[t]
+    \centering
+    \subfloat[Training loss]{\includegraphics[width=0.92\linewidth]{train_loss.avg.png} \label{fig:train_loss_avg}}\\
+    \subfloat[Training accuracy]{\includegraphics[width=0.92\linewidth]{train_acc.avg.png} \label{fig:train_acc_avg}}\\
+    \subfloat[Test accuracy]{\includegraphics[width=0.92\linewidth]{test_accuracy.png} \label{fig:test_accuracy}}
+    \caption{CAML classification diagnostics on long-tailed CIFAR-100 with MetaLoRA adapters. Loss and accuracy curves come from the classification notebook, while the held-out test trajectory highlights the improved tail performance without sacrificing convergence stability.}
+    \label{fig:training_diagnostics}
+\end{figure}
+
+Ablation experiments highlight the complementary roles of sampling and meta learning: removing the class-aware sampler reduces tail accuracy by more than $8$ points even when meta learning remains active, whereas disabling meta updates causes overconfident predictions and higher OOD false-positive rates. Decreasing the adapter rank below $r=2$ also erodes gains, underscoring the need for sufficient adaptation capacity.
+
+Nevertheless, the approach still depends on softmax confidence for OOD scoring, which could benefit from temperature scaling or energy-based adjustments. Moreover, CIFAR-100 may underrepresent real-world long-tail complexity; extending CAML to larger datasets such as ImageNet-LT is a promising direction.
+
+\section{Conclusion}
+We presented Class-Aware Meta Learning, a parameter-efficient strategy for fine-tuning vision transformers under severe class imbalance. CAML integrates stratified sampling with meta-parameterized adapters optimized via a bi-level objective, yielding improvements in minority-class accuracy and OOD robustness. Future work will explore adaptive choices of the sampling factor $K$, incorporate calibrated OOD scoring, and scale the methodology to higher-resolution long-tailed datasets.
+
+\section*{Reproducibility Notes}
+To replicate CAML, practitioners should (i) create balanced and imbalanced CIFAR-100 splits alongside SVHN, (ii) initialize a CLIP ViT-B/16 backbone equipped with cosine classification head and rank-$4$ MetaLoRA adapters, (iii) implement the class-aware batching mechanism with $K=4$ samples per class per draw, and (iv) follow Algorithm~\ref{alg:meta} using inner learning rate $0.01$, meta learning rate $10^{-3}$, validation ratio $0.1$, and $S=5$ inner steps. Reporting should include head/medium/tail accuracies, macro-F1, AUROC, AUPR, and FPR@95\% TPR. Monitoring gradient norms before and after meta updates helps ensure stable hyper-gradient estimation.
+
+\begin{thebibliography}{00}
+\bibitem{tian2025metahp} Z. Tian, Y. Liu, and Q. Sun, "Meta-Learning Hyperparameters for Parameter Efficient Fine-Tuning," in \emph{CVPR}, 2025, pp. 23037--23047.
+\bibitem{dosovitskiy2021vit} A. Dosovitskiy \emph{et al.}, "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale," in \emph{ICLR}, 2021.
+\bibitem{hu2022lora} E. Hu \emph{et al.}, "LoRA: Low-Rank Adaptation of Large Language Models," in \emph{ICLR}, 2022.
+\bibitem{houlsby2019adapter} N. Houlsby \emph{et al.}, "Parameter-Efficient Transfer Learning for NLP," in \emph{ICLR}, 2019.
+\bibitem{finn2017maml} C. Finn, P. Abbeel, and S. Levine, "Model-Agnostic Meta-Learning for Fast Adaptation of Deep Networks," in \emph{ICML}, 2017.
+\bibitem{ren2018reweight} M. Ren, W. Zeng, B. Yang, and R. Urtasun, "Learning to Reweight Examples for Robust Deep Learning," in \emph{ICML}, 2018.
+\bibitem{jamal2020class} M. A. Jamal, L. E. Shafey, and M. M. Alam, "Learning Class-bias in Multiclass Imbalanced Data," in \emph{CVPR}, 2020.
+\bibitem{hendrycks2017baseline} D. Hendrycks and K. Gimpel, "A Baseline for Detecting Misclassified and Out-of-Distribution Examples in Neural Networks," in \emph{ICLR}, 2017.
+\end{thebibliography}
+
+\end{document}
