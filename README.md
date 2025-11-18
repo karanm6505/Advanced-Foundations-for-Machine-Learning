@@ -11,10 +11,9 @@ For example:
 
 You can view and run the full notebook here:
 
-👉 **[Open in Colab]([COLAB_LINK_HERE](https://colab.research.google.com/drive/1vRav1AMWRHQw0TOp4MDV6f6-ySuDY41m?usp=sharing))**
+👉 **[Open in Colab](https://colab.research.google.com/drive/1vRav1AMWRHQw0TOp4MDV6f6-ySuDY41m?usp=sharing)**
 
 ---
 
 ## 📂 Project Structure
 
-Briefly describe the important files / folders:
